@@ -12,9 +12,11 @@ import (
 
 	"github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox"
 	"github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox/files"
+	"github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox/sharing"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fstest/fstests"
 	"github.com/rclone/rclone/lib/batcher"
+	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -141,6 +143,52 @@ func TestPaperExportRemote(t *testing.T) {
 	legacy, err := f.newObjectWithInfo(ctx, "document.paper", info)
 	require.NoError(t, err)
 	assert.Equal(t, "document.md", legacy.Remote())
+}
+
+// receivedFilesClient is a mock sharing.ContextClient which returns a fixed
+// set of received shared files
+type receivedFilesClient struct {
+	sharing.ContextClient
+	res *sharing.ListFilesResult
+}
+
+func (c receivedFilesClient) ListReceivedFilesContext(ctx context.Context, arg *sharing.ListFilesArg) (*sharing.ListFilesResult, error) {
+	return c.res, nil
+}
+
+// TestListReceivedFilesStandardName checks that listReceivedFiles reports the
+// remote name in rclone's standard encoding, matching listSharedFolders, so
+// that findSharedFile lookups compare like with like.
+func TestListReceivedFilesStandardName(t *testing.T) {
+	ctx := context.Background()
+	ti := dropbox.DBXTime(time.Now())
+	raw := "received\x7ffile.txt"
+	f := &Fs{
+		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(0), pacer.MaxSleep(time.Millisecond))),
+		sharing: receivedFilesClient{res: &sharing.ListFilesResult{
+			Entries: []*sharing.SharedFileMetadata{{
+				Name:        raw,
+				PreviewUrl:  "https://www.dropbox.com/preview",
+				TimeInvited: &ti,
+			}},
+		}},
+	}
+	f.opt.Enc = encoder.Base |
+		encoder.EncodeBackSlash |
+		encoder.EncodeDel |
+		encoder.EncodeRightSpace |
+		encoder.EncodeInvalidUtf8
+
+	var got string
+	err := f.listReceivedFiles(ctx, func(entry fs.DirEntry) error {
+		got = entry.(*Object).remote
+		return nil
+	})
+	require.NoError(t, err)
+
+	// guard: the raw name must actually need encoding conversion
+	require.NotEqual(t, raw, f.opt.Enc.ToStandardName(raw))
+	assert.Equal(t, f.opt.Enc.ToStandardName(raw), got)
 }
 
 // uploadSessionClient is a mock files.ContextClient which records the
